@@ -224,16 +224,43 @@ class clsSpanQL(object):
         dictUpdateSet['dictUpdateSet'] = i
         return dictUpdateSet
     
-    def dictPrimesBySelect(strTable, strWhere):
-        # Spanner only allows UPDATE and DELETES by keys.  So, get the keys of a table.
-        self.spannerDB.getDDL()
-        
+    def lsPrimesBySelect(strTable, strWhere):
+        # Spanner only allows UPDATE and DELETES by keys.  So, get the Primary Keys of a table.
+        # Future task: need to allow querying for joined tables.
+        dictPrimesBySelect = {}
+        lsPKFields = []
+        dictFieldVals = {}
+        # Get key fields from information_schema
+        with database.snapshot() as snapshot:
+             results = snapshot.execute_sql("SELECT column_name
+                 FROM information_schema.index_columns
+                 WHERE table_name = '%s' AND index_type='PRIMARY_KEY'
+                 ORDER BY ordinal_position"%(strTable))
+        for row in results:
+            lsPKFields.append(row[0])
+        # Select pk fields based on the WHERE, which had better be ONE record, and retrun field(s) and value(s)
+        # Get key values with the strWhere criteria
+        with database.snapshot() as snapshot:
+             results = snapshot.execute_sql("SELECT %s
+                 FROM %s
+                 %s"%(lsPKFields.join(), strTable, strWhere))
+        # Convert row to dictionary.
+        # There are as many row elements as PKField elements
+        for row in results:
+            p = 0
+            while (p < len(lsPKFields)):
+                dictFieldVals[lsPKFields[p]] = row[p]
+                p += 1
+            lsPrimesBySelect.append(dictFieldVals)
+        return lsPrimesBySelect
+
 
     def fnAbsUpdate(self, strTable, arrFields, arrValues, idKey):
         # Cloud Spanner can only work on the PK in UPDATE...WHERE statements.
         # Our compatilibility layer will simply fetch the keys first, and then
         # UPDATE based on the keys that came back.
         # (There is the unfortunate memory limit, which we won't know yet.)
+        # [{key1:row1val1, key2:row1val2,...}, {key1:row2val1, key2:row2val2,...},...}
         sqlUpdate = re.sub('\n', ' ', sqlUpdate)
         sqlUpdate = re.sub('\t', ' ', sqlUpdate)
         sqlUpdate = re.sub(' +', ' ', sqlUpdate)
@@ -250,12 +277,28 @@ class clsSpanQL(object):
         strWhere = ""
         if (strSet[strWhere:strWhere+5].lower() == "where"):
             strWhere = strSet[strWhere:].strip()
-        dictP = dictPrimesBySelect(strTable, strWhere)
+        # lsd = list of dictionaries
+        lsdRecords = lsPrimesBySelect(strTable, strWhere)
+        # Set/Replace keys from lsdRecords into dictUpdate
+        for dRecord in lsdRecords:
+            dictUpdate.update(dRecord)
+            lsColumns = []
+            lsValues = []
+            for k in dictUpdate:
+                lsColumns.append(k)
+                lsValues.append(dictUpdate[k])
+            
+            with database.transaction() as transaction:
+                transaction.update(
+                    table=strTable,
+                    columns=lsColumns,
+                    values=lsValues
+            
         
     def fnAbsDelete(self, strTable, idKey):
         # Like the UPDATE, CS can only work on the PK in DELETE...WHERE statements.
         # Our compatilibility layer will simply fetch the keys first, and then
-        # UPDATE based on the keys that came back.
+        # DELETE based on the keys that came back.
         # (There is the unfortunate memory limit, which we won't know yet.)
         sqlUpdate = re.sub('\n', ' ', sqlUpdate)
         sqlUpdate = re.sub('\t', ' ', sqlUpdate)
