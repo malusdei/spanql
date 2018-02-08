@@ -1,6 +1,9 @@
 #!/bin/python
 import sys
 import re
+import datetime
+import pprint
+import random
 from google.cloud import spanner
 from google.cloud.spanner_v1.proto import type_pb2
 
@@ -29,7 +32,7 @@ class clsSpanQL(object):
         # This function performs an actual SELECT, and then returns the PK values of the table.
         print sqlSelect
 
-    def lsStrToList(strValues):
+    def lsStrToList(self, strValues):
         # Need to split by comma, yet ignore commas in quotes
         lsNumChars = ['1','2','3','4','5','6','7','8','9','0','-','.']
         lsStrToList = []
@@ -38,43 +41,50 @@ class clsSpanQL(object):
         strType = ""
         i = 0
         while (i < len(strValues)):
-            lsTemp = []
             if (strValues[i] == '"'):
                 strType = "text"
                 j = strValues.find('"', i + 1)
                 # Be super careful of escaped Quotes in Quotes
-                while (strValues[j-1] != "\\"):
+                while (strValues[j-1] == "\\"):
                     j = strValues.find('"', j + 1)
                 # Doublecheck that it was properly terminated
                 if (j == -1):
                     print "Double quote not properly terminated."
                     sys.exit()
                 lsTemp.append(strValues[i+1:j])
+                print ("Looking for end double quote")
                 i = j + 1
             elif (strValues[i] == "'"):
                 strType = "text"
                 j = strValues.find("'", i + 1)
                 # Be super careful of escaped Quotes in Quotes
-                while (strValues[j-1] != "\\"):
+                while (strValues[j-1] == "\\"):
                     j = strValues.find("'", j + 1)
+                    print ("Looking for end single quote")
                 # Doublecheck that it was properly terminated
                 if (j == -1):
                     print "Single quote not properly terminated."
                     sys.exit()
                 lsTemp.append(strValues[i+1:j])
+                print ("Appending %s"%strValues[i+1:j])
                 i = j + 1
             elif (strValues[i] == "("):
                 # Start of list
                 lsTemp = []
+                print ("Start of List")
                 i += 1
             elif (strValues[i] == ")"):
                 # End of list
                 lsStrToList.append(lsTemp)
+                print ("End of List")
+                print (lsTemp)
                 i += 1
             elif (strValues[i] == ","):
                 # End of field, start a new one
+                print ("End of Field")
                 i += 1
             elif (strValues[i] == " "):
+                print ("Space, skipping")
                 i += 1
             elif (strValues[i] in lsNumChars):
                 j = i + 1
@@ -87,6 +97,7 @@ class clsSpanQL(object):
                 else:
                     strType = "float"
                     lsTemp.append(float(strTemp))
+                print ("Final Number %s."%strTemp)
                 i = j
             else:
                 # That should be all the cases.  If code lands here, something is wrong
@@ -107,6 +118,7 @@ class clsSpanQL(object):
     
     def fnAbsInsert(self, sqlInsert):
         lsDBTable = []
+        lsData = []
         lsFields = []
         flgFieldsListed = 0
         lsValues = ()
@@ -126,28 +138,31 @@ class clsSpanQL(object):
                 sys.exit(1)
         # Get Fields
         if (lsInsert[3][0] == "("):
-            strValues = re.sub(' ', '', lsInsert[3][1:strValues.find(")")])
-            lsValues = strValues.split(",")
+            strFields = re.sub(' ', '', lsInsert[3][1:lsInsert[3].find(")")])
+            lsFields = strFields.split(",")
             flgFieldsListed = 1
         else:
             # Going to have to examine the table and get the fields names, in order
             # lsValues = lsGetFieldsFromTable
             flgFieldsListed = 0
-        strData = lsInsert[3][strValues.find(")") + 1:].strip()
+        strData = lsInsert[3][lsInsert[3].find(")") + 1:].strip()
         # strData now either starts with "values" or "select"
-        if (strData[0:5].lower() == "values"):
-            lsData = lsStrToList(strData[6:].strip())
+        if (strData[0:6].lower() == "values"):
+            lsData = self.lsStrToList(strData[6:].strip())
         
         if (strData[0:5].lower() == "select"):
             # Then it is a valid SELECT statement. We can run it against our own engine and enter the results ourselves.
             lsData = lsFromSelect(strData.strip())
             
-        with self.db.batch() as batch:
+        print (lsFields)
+        print (lsData)
+        """with self.db.batch() as batch:
             batch.insert(
                 table=strTable,
                 columns=tuple(lsFields),
                 values=tuple(lsData))
         # We may need to force to those aforementioned Unicode values first.
+        """
 
     def dictUpdateSet(strSet):
         # strSet is just the Set portion of an UPDATE.
@@ -165,7 +180,7 @@ class clsSpanQL(object):
         i = strSet.find("=") + 1
         while (i < len(strSet)):
             lsTemp = []
-            elif (strSet[i] == '"'):
+            if (strSet[i] == '"'):
                 j = strSet.find('"', i + 1)
                 # Be super careful of escaped Quotes in Quotes
                 while (strSet[j-1] != "\\"):
@@ -232,17 +247,17 @@ class clsSpanQL(object):
         dictFieldVals = {}
         # Get key fields from information_schema
         with database.snapshot() as snapshot:
-             results = snapshot.execute_sql("SELECT column_name
-                 FROM information_schema.index_columns
-                 WHERE table_name = '%s' AND index_type='PRIMARY_KEY'
+             results = snapshot.execute_sql("SELECT column_name \
+                 FROM information_schema.index_columns \
+                 WHERE table_name = '%s' AND index_type='PRIMARY_KEY' \
                  ORDER BY ordinal_position"%(strTable))
         for row in results:
             lsPKFields.append(row[0])
         # Select pk fields based on the WHERE, which had better be ONE record, and retrun field(s) and value(s)
         # Get key values with the strWhere criteria
         with database.snapshot() as snapshot:
-             results = snapshot.execute_sql("SELECT %s
-                 FROM %s
+             results = snapshot.execute_sql("SELECT %s \
+                 FROM %s \
                  %s"%(lsPKFields.join(), strTable, strWhere))
         # Convert row to dictionary.
         # There are as many row elements as PKField elements
@@ -264,6 +279,7 @@ class clsSpanQL(object):
         sqlUpdate = re.sub('\n', ' ', sqlUpdate)
         sqlUpdate = re.sub('\t', ' ', sqlUpdate)
         sqlUpdate = re.sub(' +', ' ', sqlUpdate)
+        lsValues = []
         lsUpdate = sqlUpdate.split(" ", 4)
         # [0] UPDATE
         # [1] Table Name
@@ -283,16 +299,18 @@ class clsSpanQL(object):
         for dRecord in lsdRecords:
             dictUpdate.update(dRecord)
             lsColumns = []
-            lsValues = []
+            lsTempVal = []
             for k in dictUpdate:
                 lsColumns.append(k)
-                lsValues.append(dictUpdate[k])
-            
+                lsTempVal.append(dictUpdate[k])
+            lsValues.append(lsTempVal)
             with database.transaction() as transaction:
                 transaction.update(
                     table=strTable,
                     columns=lsColumns,
-                    values=lsValues
+                    values=lsValues)
+        print (lsColumns)
+        print (lsValues)
             
         
     def fnAbsDelete(self, strTable, idKey):
@@ -318,3 +336,25 @@ class clsSpanQL(object):
     def fnDropTable(self, strTable):
         print strTable
 
+
+def main():
+    # Instantiate a client.
+    spanner_client = spanner.Client()
+
+    # Your Cloud Spanner instance ID.
+    instance_id = 'solomoninstance'
+
+    # Get a Cloud Spanner instance by ID.
+    instance = spanner_client.instance(instance_id)
+
+    # Your Cloud Spanner database ID.
+    database_id = 'bankdb'
+
+    # Get a Cloud Spanner database by ID.
+    database = instance.database(database_id)
+
+    spank = clsSpanQL(instance, database)
+    spank.fnAbsInsert("INSERT INTO tblMyTable (mt_id, mtval, fname, whatever) values (321, 111, 'Hey\\'s there', 'Balah Balah Balah!'), (234, 432, 'Ima Rockstar', 'Get Paid')")
+
+if __name__ == "__main__":
+    main()
