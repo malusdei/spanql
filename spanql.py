@@ -30,7 +30,7 @@ class clsSpanQL(object):
         # Normally, a SELECT will not be alone in a replication event, but it will be a sub statement for an
         # INSERT, UPDATE, or DELETE, which can only operate by keys.
         # This function performs an actual SELECT, and then returns the PK values of the table.
-        print sqlSelect
+        print (sqlSelect)
 
     def lsStrToList(self, strValues):
         # Need to split by comma, yet ignore commas in quotes
@@ -49,7 +49,7 @@ class clsSpanQL(object):
                     j = strValues.find('"', j + 1)
                 # Doublecheck that it was properly terminated
                 if (j == -1):
-                    print "Double quote not properly terminated."
+                    print ("Double quote not properly terminated.")
                     sys.exit()
                 lsTemp.append(strValues[i+1:j])
                 print ("Looking for end double quote")
@@ -63,7 +63,7 @@ class clsSpanQL(object):
                     print ("Looking for end single quote")
                 # Doublecheck that it was properly terminated
                 if (j == -1):
-                    print "Single quote not properly terminated."
+                    print ("Single quote not properly terminated.")
                     sys.exit()
                 lsTemp.append(strValues[i+1:j])
                 print ("Appending %s"%strValues[i+1:j])
@@ -102,15 +102,16 @@ class clsSpanQL(object):
             else:
                 # That should be all the cases.  If code lands here, something is wrong
                 # Throw an exception and exit.
-                print "Fatal error: unexpected character %s at position %i in: \n %s"%(strValues[i], i, strValues)
+                print ("Fatal error: unexpected character %s at position %i in: \n %s"%(strValues[i], i, strValues))
         return lsStrToList
     
-    def lsFromSelect(strSelect):
+    def lsFromSelect(self, strSelect):
         lsFromSelect = []
         with self.spannerDB.snapshot() as snapshot:
             result = snapshot.execute_sql(strSelect)
             for r in result:
                 lsFromSelect.append(r)
+        return lsFromSelect
         # Some caveats: a JOIN involving another schema will crash this Select statement.
         # It would be in our best interest to see if this might be the case and throw an
         # exception if it is.
@@ -134,25 +135,38 @@ class clsSpanQL(object):
             strTable = lsDBTable[1]
             if (lsDBTable[0] == self.strDB):
                 #Stop.  Throw an error.
-                print "References table in another schema."
+                print ("References table in another schema.")
                 sys.exit(1)
         # Get Fields
+        lsInsert[3] = lsInsert[3].strip()
         if (lsInsert[3][0] == "("):
+            # Then fields are described in the query.
+            # Assume next available closing parentheses are end of field list.
             strFields = re.sub(' ', '', lsInsert[3][1:lsInsert[3].find(")")])
             lsFields = strFields.split(",")
+            strData = lsInsert[3][lsInsert[3].find(")") + 1:].strip()
             flgFieldsListed = 1
         else:
             # Going to have to examine the table and get the fields names, in order
             # lsValues = lsGetFieldsFromTable
+            with self.spannerDB.snapshot() as snapshot:
+                results = snapshot.execute_sql("SELECT column_name \
+                     FROM information_schema.columns \
+                     WHERE table_name = '%s' \
+                     ORDER BY ordinal_position"%(strTable))
+            for row in results:
+                lsFields.append(row[0])
+            strData = lsInsert[3]
             flgFieldsListed = 0
-        strData = lsInsert[3][lsInsert[3].find(")") + 1:].strip()
+
+        # At this point, strData is either a values list or select statement.
         # strData now either starts with "values" or "select"
         if (strData[0:6].lower() == "values"):
             lsData = self.lsStrToList(strData[6:].strip())
         
-        if (strData[0:5].lower() == "select"):
+        if (strData[0:6].lower() == "select"):
             # Then it is a valid SELECT statement. We can run it against our own engine and enter the results ourselves.
-            lsData = lsFromSelect(strData.strip())
+            lsData = self.lsFromSelect(strData.strip())
             
         print (lsFields)
         print (lsData)
@@ -187,7 +201,7 @@ class clsSpanQL(object):
                     j = strSet.find('"', j + 1)
                 # Doublecheck that it was properly terminated
                 if (j == -1):
-                    print "Double quote not properly terminated."
+                    print ("Double quote not properly terminated.")
                     sys.exit()
                 dictUpdateSet[tempKey] = strSet[i+1:j]
                 tempKey = ""
@@ -200,7 +214,7 @@ class clsSpanQL(object):
                     j = strSet.find("'", j + 1)
                 # Doublecheck that it was properly terminated
                 if (j == -1):
-                    print "Single quote not properly terminated."
+                    print ("Single quote not properly terminated.")
                     sys.exit()
                 dictUpdateSet[tempKey] = strSet[i+1:j]
                 tempKey = ""
@@ -231,7 +245,7 @@ class clsSpanQL(object):
                 # Throw an exception and exit.
                 # A "self-referencing" value, like UPDATE my_table SET my_field = my_field + 1
                 # might not be able to be handled by Spanner.  Double check.
-                print "Fatal error: unexpected character %s at position %i in: \n %s"%(strSet[i], i, strSet)
+                print ("Fatal error: unexpected character %s at position %i in: \n %s"%(strSet[i], i, strSet))
                 
         # I could use some advice here. I need to return two things - the dictionary and an integer showing
         # the position of the syntactical WHERE clause.  I believe I will "cheat" by adding an additional
@@ -246,7 +260,7 @@ class clsSpanQL(object):
         lsPKFields = []
         dictFieldVals = {}
         # Get key fields from information_schema
-        with database.snapshot() as snapshot:
+        with self.spannerDB.snapshot() as snapshot:
              results = snapshot.execute_sql("SELECT column_name \
                  FROM information_schema.index_columns \
                  WHERE table_name = '%s' AND index_type='PRIMARY_KEY' \
@@ -255,7 +269,7 @@ class clsSpanQL(object):
             lsPKFields.append(row[0])
         # Select pk fields based on the WHERE, which had better be ONE record, and retrun field(s) and value(s)
         # Get key values with the strWhere criteria
-        with database.snapshot() as snapshot:
+        with self.spannerDB.snapshot() as snapshot:
              results = snapshot.execute_sql("SELECT %s \
                  FROM %s \
                  %s"%(lsPKFields.join(), strTable, strWhere))
@@ -267,6 +281,7 @@ class clsSpanQL(object):
                 dictFieldVals[lsPKFields[p]] = row[p]
                 p += 1
             lsPrimesBySelect.append(dictFieldVals)
+        # One caveat: TIMESTAMP fields return a strange value.  SELECTs involving timestamps may crash.
         return lsPrimesBySelect
 
 
@@ -304,7 +319,7 @@ class clsSpanQL(object):
                 lsColumns.append(k)
                 lsTempVal.append(dictUpdate[k])
             lsValues.append(lsTempVal)
-            with database.transaction() as transaction:
+            with self.spannerDB.transaction() as transaction:
                 transaction.update(
                     table=strTable,
                     columns=lsColumns,
@@ -328,13 +343,13 @@ class clsSpanQL(object):
         
 
     def fnCreateTable(self, strTable, lsFields):
-        print lsFields
+        print (lsFields)
 
     def fnAlterTable(self, strSQL):
-        print strSQL
+        print (strSQL)
         
     def fnDropTable(self, strTable):
-        print strTable
+        print (strTable)
 
 
 def main():
@@ -354,7 +369,7 @@ def main():
     database = instance.database(database_id)
 
     spank = clsSpanQL(instance, database)
-    spank.fnAbsInsert("INSERT INTO tblMyTable (mt_id, mtval, fname, whatever) values (321, 111, 'Hey\\'s there', 'Balah Balah Balah!'), (234, 432, 'Ima Rockstar', 'Get Paid')")
+    spank.fnAbsInsert("INSERT INTO AccountHistory select * from AccountHistory")
 
 if __name__ == "__main__":
     main()
